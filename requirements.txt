@@ -1,0 +1,11 @@
+# fastapi
+# uvicorn
+# aiokafka
+# aiopg
+
+fastapi==0.104.1 
+uvicorn==0.23.2 
+aiokafka==0.13.1 
+redis==4.6.0 
+sqlalchemy==2.0.23 
+psycopg2-binary==2.9.9 
