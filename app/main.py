@@ -1,47 +1,39 @@
 from fastapi import FastAPI, Depends, HTTPException
-from aiokafka import AIOKafkaProducer, AIOKafkaConsumer 
-import redis.asyncio as redis 
-import json 
-from uuid import uuid4 
+from pydantic import BaseModel
+from app.kafka_producer import send_to_kafka
+from app.kafka_consumer import consume_response
+from app.redis_client import get_redis, set_redis
+import json
+import asyncio
+import uuid
 
 app = FastAPI()
 
-# Конфигурация 
-KAFKA_BROKERS = "kafka:9092" 
-REQUEST_TOPIC = "search_topic" 
-RESPONSE_TOPIC = "response_topic" 
-redis_client = redis.Redis(host="redis", port=6379)
+class SearchQuery(BaseModel):
+    query: str
 
-@app.post("/search") 
-async def search(query: str): 
-    cache_key = f"search:{query}" 
-    cached = await redis_client.get(cache_key)
+@app.post("/search", status_code=200)
+async def search(search_query: SearchQuery, redis=Depends(get_redis)):
+    query = search_query.query
+    cache_key = f"search_query_{query}"
 
-    if cached: 
-        return {"from_cache": True, "results": json.loads(cached)}
+    # Проверка кэша
+    cached_result = await redis.get(cache_key)
+    if cached_result:
+        return {"message": "Results from cache", "data": json.loads(cached_result)}
 
-    request_id = str(uuid4()) 
-    producer = AIOKafkaProducer(bootstrap_servers=KAFKA_BROKERS) 
-    await producer.start() 
+    # Генерация уникального ID запроса
+    request_id = str(uuid.uuid4())
 
-    try: 
-        await producer.send(REQUEST_TOPIC, json.dumps({ "query": query, 
-                                                        "request_id": request_id 
-                                                        }).encode('utf-8')) 
+    # Отправка запроса в Kafka
+    await send_to_kafka({"query": query, "request_id": request_id})
 
-    finally: 
-        await producer.stop() 
+    # Ожидание ответа из Kafka
+    response = await consume_response(request_id)
+    if not response:
+        raise HTTPException(status_code=504, detail="No response from search service")
 
-    consumer = AIOKafkaConsumer( RESPONSE_TOPIC,
-                                bootstrap_servers=KAFKA_BROKERS,
-                                group_id="client_group" ) 
-    await consumer.start() 
+    # Сохранение результата в Redis
+    await set_redis(cache_key, json.dumps(response), ex=3600)
 
-    try: 
-        async for msg in consumer: 
-            response = json.loads(msg.value.decode('utf-8')) 
-            if response.get("request_id") == request_id: 
-                return response 
-
-    finally: 
-        await consumer.stop()
+    return {"message": "Search processed successfully", "data": response}
